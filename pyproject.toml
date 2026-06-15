@@ -1,0 +1,10 @@
+[project]
+name = "ai-video-editor-agent"
+version = "1.0.0"
+description = "Local Windows AI video editing agent with DaVinci Resolve and FFmpeg backends."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ai-video-agent = "ai_video_agent.cli:main"
+ai-video-agent-gui = "ai_video_agent.gui:main"
