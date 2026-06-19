@@ -37,19 +37,3 @@ workspace/resolve_review/*
 
 # Bundled local binaries should be installed by the user
 tools/ffmpeg/bin/*
-
-# Keep folder skeletons
-!inputs/videos/.gitkeep
-!inputs/images/.gitkeep
-!assets/music/.gitkeep
-!assets/sfx/.gitkeep
-!assets/fonts/.gitkeep
-!assets/stickers/.gitkeep
-!outputs/rough_cuts/.gitkeep
-!outputs/finals/.gitkeep
-!outputs/logs/.gitkeep
-!subtitles/.gitkeep
-!timelines/.gitkeep
-!workspace/cache/.gitkeep
-!workspace/manifests/.gitkeep
-!tools/ffmpeg/bin/.gitkeep
