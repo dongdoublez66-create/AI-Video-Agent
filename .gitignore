@@ -1,3 +1,4 @@
+# Python cache/build artifacts
 __pycache__/
 *.py[cod]
 *.pyo
@@ -15,25 +16,21 @@ dist/
 .env.*
 !.env.example
 
-# User media and generated videos
-inputs/videos/*
-inputs/images/*
-assets/music/*
-assets/sfx/*
-assets/fonts/*
-assets/stickers/*
-outputs/rough_cuts/*
-outputs/finals/*
-outputs/logs/*
-outputs/custom_test/*
-subtitles/*
-timelines/*
+# User media, generated outputs, model weights and runtime cache
+assets/
+inputs/
+outputs/
+models/
+subtitles/
+timelines/
+workspace/
 
-# Runtime workspace
-workspace/cache/*
-workspace/manifests/*
-workspace/runs/*
-workspace/resolve_review/*
+# Optional local binaries
+# Keep installer/download instructions in README; do not commit ffmpeg binaries.
+tools/ffmpeg/bin/
 
-# Bundled local binaries should be installed by the user
-tools/ffmpeg/bin/*
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

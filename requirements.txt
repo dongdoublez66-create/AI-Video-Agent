@@ -1,0 +1,13 @@
+# Install the CUDA build of PyTorch first when you want GPU acceleration.
+# Example for CUDA 12.1:
+# python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision
+torchaudio
+diffusers>=0.27.0
+transformers
+accelerate
+opencv-python
+safetensors
+Pillow
+dashscope

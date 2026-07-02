@@ -1,10 +1,25 @@
 [project]
 name = "ai-video-editor-agent"
 version = "1.0.0"
-description = "Local Windows AI video editing agent with DaVinci Resolve and FFmpeg backends."
+description = "Local Windows AI video and image creation agent with DaVinci Resolve, FFmpeg, and SDXL backends."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "Pillow",
+    "opencv-python",
+    "diffusers>=0.27.0",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "dashscope",
+]
 
 [project.scripts]
 ai-video-agent = "ai_video_agent.cli:main"
 ai-video-agent-gui = "ai_video_agent.gui:main"
+
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ai_video_agent*"]

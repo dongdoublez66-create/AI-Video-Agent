@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 from .config import AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, ROOT, VIDEO_EXTENSIONS
 from .llm import LLMConfig, OpenAICompatibleClient
+from .timeline_optimizer import compact_analysis_for_prompt, optimize_timeline
+from .video_analysis import analyze_video_segments
 
 
 LogFn = Callable[[str], None]
@@ -33,6 +35,7 @@ class EditRequest:
     target_duration: int
     aspect_ratio: str
     prefer_davinci: bool = True
+    enable_algorithm: bool = True
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ class EditResult:
     script_path: Path
     subtitle_path: Path
     report_path: Path
+    analysis_path: Path
 
 
 class AgentError(RuntimeError):
@@ -54,10 +58,12 @@ def run_edit(request: EditRequest, log: LogFn = print) -> EditResult:
     started_at = datetime.now()
     slug = safe_slug(request.output_name or f"edit_{started_at:%Y%m%d_%H%M%S}")
     run_dir = ROOT / "workspace" / "runs" / f"{started_at:%Y%m%d_%H%M%S}_{slug}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "review").mkdir(exist_ok=True)
-    (run_dir / "resolve").mkdir(exist_ok=True)
-    (run_dir / "ffmpeg").mkdir(exist_ok=True)
+    review_dir = run_dir / "review"
+    analysis_dir = run_dir / "analysis"
+    (run_dir / "resolve").mkdir(parents=True, exist_ok=True)
+    (run_dir / "ffmpeg").mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
+    analysis_dir.mkdir(parents=True, exist_ok=True)
 
     log("正在扫描素材...")
     manifest = scan_media(request.media_dir, request.music_dir)
@@ -67,9 +73,25 @@ def run_edit(request: EditRequest, log: LogFn = print) -> EditResult:
     write_json(manifest_path, manifest)
 
     log("正在抽取关键帧...")
-    frame_index = extract_review_frames(manifest, run_dir / "review")
-    frame_index_path = run_dir / "review" / "frames_index.json"
+    frame_index = extract_review_frames(manifest, review_dir)
+    frame_index_path = review_dir / "frames_index.json"
     write_json(frame_index_path, frame_index)
+
+    analysis_path = analysis_dir / "video_analysis.json"
+    if request.enable_algorithm and manifest["videos"]:
+        log("正在进行算法分析：切分候选片段、计算清晰度、运动量和音频能量...")
+        analysis = analyze_video_segments(manifest, analysis_dir, request.target_duration, log)
+        if not analysis_path.exists():
+            write_json(analysis_path, analysis)
+    else:
+        analysis = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "method": "lightweight_v1",
+            "available": False,
+            "reason": "algorithm disabled or no videos",
+            "segments": [],
+        }
+        write_json(analysis_path, analysis)
 
     log("正在调用大模型生成剪辑脚本和时间线...")
     llm = OpenAICompatibleClient(
@@ -80,22 +102,25 @@ def run_edit(request: EditRequest, log: LogFn = print) -> EditResult:
             timeout_seconds=180,
         )
     )
-    plan = create_llm_plan(llm, request, manifest, frame_index)
-    plan = normalize_plan(plan, request, manifest)
+    plan = create_llm_plan(llm, request, manifest, frame_index, analysis)
+    plan = normalize_plan(plan, request, manifest, analysis)
 
-    timeline = build_timeline(plan, request, manifest)
-    script_text = build_script_markdown(plan, timeline, request, manifest)
+    timeline = build_timeline(plan, request, manifest, analysis)
+    if request.enable_algorithm:
+        log("正在用算法优化时间线...")
+        timeline = optimize_timeline(timeline, analysis, request.target_duration)
+
+    script_text = build_script_markdown(plan, timeline, request, manifest, analysis)
 
     timeline_path = ROOT / "timelines" / f"{slug}.json"
     subtitle_path = ROOT / "subtitles" / f"{slug}.srt"
     script_path = ROOT / "outputs" / "logs" / f"{slug}_script.md"
     report_path = run_dir / "agent_report.json"
 
-    timeline_path.parent.mkdir(parents=True, exist_ok=True)
-    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(timeline_path, timeline)
+    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     subtitle_path.write_text(render_srt(timeline["scenes"]), encoding="utf-8")
+    script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text(script_text, encoding="utf-8")
 
     output_base_dir = request.output_dir.expanduser().resolve() if request.output_dir else ROOT / "outputs" / "rough_cuts"
@@ -130,9 +155,11 @@ def run_edit(request: EditRequest, log: LogFn = print) -> EditResult:
             "aspect_ratio": request.aspect_ratio,
             "model": request.model,
             "base_url": request.base_url,
+            "enable_algorithm": request.enable_algorithm,
         },
         "manifest": str(manifest_path),
         "frames": str(frame_index_path),
+        "analysis": str(analysis_path),
         "timeline": str(timeline_path),
         "script": str(script_path),
         "subtitles": str(subtitle_path),
@@ -150,6 +177,7 @@ def run_edit(request: EditRequest, log: LogFn = print) -> EditResult:
         script_path=script_path,
         subtitle_path=subtitle_path,
         report_path=report_path,
+        analysis_path=analysis_path,
     )
 
 
@@ -190,7 +218,7 @@ def scan_files(folder: Path, extensions: set[str], media_type: str) -> list[dict
 def probe_media(path: Path) -> dict[str, Any]:
     ffprobe = find_ffprobe()
     if not ffprobe:
-        return {}
+        return probe_media_with_ffmpeg(path)
     cmd = [
         ffprobe,
         "-v",
@@ -208,6 +236,32 @@ def probe_media(path: Path) -> dict[str, Any]:
         return json.loads(completed.stdout or "{}")
     except json.JSONDecodeError:
         return {}
+
+
+def probe_media_with_ffmpeg(path: Path) -> dict[str, Any]:
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return {}
+    cmd = [ffmpeg, "-hide_banner", "-i", str(path)]
+    completed = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    text = (completed.stderr or "") + "\n" + (completed.stdout or "")
+    result: dict[str, Any] = {"format": {}, "streams": []}
+    duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if duration_match:
+        hours = int(duration_match.group(1))
+        minutes = int(duration_match.group(2))
+        seconds = float(duration_match.group(3))
+        result["format"]["duration"] = str(hours * 3600 + minutes * 60 + seconds)
+    resolution_match = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", text)
+    if resolution_match:
+        result["streams"].append(
+            {
+                "codec_type": "video",
+                "width": int(resolution_match.group(1)),
+                "height": int(resolution_match.group(2)),
+            }
+        )
+    return result
 
 
 def extract_review_frames(manifest: dict[str, Any], review_dir: Path) -> list[dict[str, Any]]:
@@ -256,17 +310,19 @@ def create_llm_plan(
     request: EditRequest,
     manifest: dict[str, Any],
     frame_index: list[dict[str, Any]],
+    analysis: dict[str, Any] | None,
 ) -> dict[str, Any]:
     media_summary = summarize_media(manifest, frame_index)
+    algorithm_summary = compact_analysis_for_prompt(analysis)
     width, height = dimensions_for_aspect(request.aspect_ratio)
     system = (
-        "你是一个本地视频剪辑 Agent 的剪辑导演。你必须基于用户素材信息生成可执行 JSON，"
-        "不要编造不存在的素材。输出必须是 JSON 对象。"
+        "你是一个本地视频剪辑 Agent 的剪辑导演。你必须基于用户素材信息和算法评分生成可执行 JSON，"
+        "不要编造不存在的素材，不要输出 Markdown。"
     )
     user = f"""
 请为本地自动剪辑生成方案。
 
-用户想要的风格：
+用户想要的视频风格：
 {request.style}
 
 关键帧和重点内容补充：
@@ -276,10 +332,14 @@ def create_llm_plan(
 {request.focus_notes}
 
 目标时长：约 {request.target_duration} 秒
-画幅：{request.aspect_ratio}，导出尺寸 {width}x{height}
+画幅：{request.aspect_ratio}
+导出尺寸：{width}x{height}
 
 素材信息：
 {json.dumps(media_summary, ensure_ascii=False, indent=2)}
+
+算法推荐的高光候选片段：
+{json.dumps(algorithm_summary, ensure_ascii=False, indent=2)}
 
 请返回 JSON，格式如下：
 {{
@@ -305,10 +365,10 @@ def create_llm_plan(
 - asset_index 从素材信息里的 videos/images 的 index 选择。
 - 视频片段 start 和 duration 不要超过素材时长。
 - 图片 start 固定 0。
-- scenes 总时长接近目标时长，但不要为了凑时长重复无意义镜头。
-- 第一段要有钩子，中段要体现重点，结尾要有收束。
-- 如果素材少，可以重复使用强镜头，但要说明理由。
-- caption 用中文，简短适合短视频。
+- 优先参考算法高光候选片段，但可以根据用户风格调整。
+- scenes 总时长接近目标时长，不要为了凑时长重复无意义镜头。
+- 第一段要有钩子，中段突出重点，结尾要有收束。
+- caption 用中文，简短，适合短视频。
 """
     return llm.complete_json(
         [
@@ -360,28 +420,54 @@ def summarize_media(manifest: dict[str, Any], frame_index: list[dict[str, Any]])
     }
 
 
-def normalize_plan(plan: dict[str, Any], request: EditRequest, manifest: dict[str, Any]) -> dict[str, Any]:
+def normalize_plan(
+    plan: dict[str, Any],
+    request: EditRequest,
+    manifest: dict[str, Any],
+    analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
     scenes = plan.get("scenes")
     if not isinstance(scenes, list) or not scenes:
-        plan["scenes"] = fallback_scenes(request, manifest)
+        plan["scenes"] = fallback_scenes(request, manifest, analysis)
     return plan
 
 
-def fallback_scenes(request: EditRequest, manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    assets = [("video", item) for item in manifest["videos"]] + [("image", item) for item in manifest["images"]]
+def fallback_scenes(
+    request: EditRequest,
+    manifest: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    scenes: list[dict[str, Any]] = []
+    top_segments = list((analysis or {}).get("top_segments") or [])
+    for row in top_segments[:8]:
+        scenes.append(
+            {
+                "asset_index": int(row.get("asset_index", 1)),
+                "asset_type": "video",
+                "start": float(row.get("start", 0)),
+                "duration": min(4.0, max(1.0, float(row.get("duration", 3)))),
+                "caption": "重点画面",
+                "notes": "根据算法高光分数自动选择。",
+                "transition": "cut" if row.get("suggested_usage") == "hook_or_key_moment" else "fade",
+            }
+        )
+    if scenes:
+        return scenes
+
+    assets = [("video", index, item) for index, item in enumerate(manifest["videos"], start=1)]
+    assets += [("image", index, item) for index, item in enumerate(manifest["images"], start=1)]
     if not assets:
         return []
     target = max(6, request.target_duration)
     per_scene = max(2.5, min(5.0, target / min(len(assets), 8)))
-    scenes = []
-    for index, (asset_type, item) in enumerate(assets[:8], start=1):
+    for index, (asset_type, asset_index, item) in enumerate(assets[:8], start=1):
         duration = per_scene if asset_type == "video" else min(4.0, per_scene)
         available = media_duration(item)
         if asset_type == "video" and available:
             duration = min(duration, max(1.0, available))
         scenes.append(
             {
-                "asset_index": index,
+                "asset_index": asset_index,
                 "asset_type": asset_type,
                 "start": 0.0,
                 "duration": duration,
@@ -393,16 +479,22 @@ def fallback_scenes(request: EditRequest, manifest: dict[str, Any]) -> list[dict
     return scenes
 
 
-def build_timeline(plan: dict[str, Any], request: EditRequest, manifest: dict[str, Any]) -> dict[str, Any]:
+def build_timeline(
+    plan: dict[str, Any],
+    request: EditRequest,
+    manifest: dict[str, Any],
+    analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     width, height = dimensions_for_aspect(request.aspect_ratio)
     fps = 30
     videos = manifest["videos"]
     images = manifest["images"]
     music = manifest["music"]
     scenes = []
-    for index, raw_scene in enumerate(plan.get("scenes", []), start=1):
+    raw_scenes = plan.get("scenes") or fallback_scenes(request, manifest, analysis)
+    for index, raw_scene in enumerate(raw_scenes, start=1):
         asset_type = str(raw_scene.get("asset_type", "video")).lower()
-        asset_index = int(raw_scene.get("asset_index", 1))
+        asset_index = int(raw_scene.get("asset_index", 1) or 1)
         collection = videos if asset_type == "video" else images
         if not collection:
             continue
@@ -414,6 +506,7 @@ def build_timeline(plan: dict[str, Any], request: EditRequest, manifest: dict[st
         if asset_type == "video" and available:
             start = min(start, max(0.0, available - 0.25))
             duration = min(duration, max(1.0, available - start))
+        transition_name = str(raw_scene.get("transition", "fade")).lower()
         scenes.append(
             {
                 "id": f"scene_{len(scenes) + 1:02d}",
@@ -422,20 +515,21 @@ def build_timeline(plan: dict[str, Any], request: EditRequest, manifest: dict[st
                 "start": start,
                 "duration": duration,
                 "transition": {
-                    "type": "fade" if str(raw_scene.get("transition", "fade")).lower() != "cut" else "cut",
-                    "duration": 0.25,
+                    "type": "cut" if transition_name == "cut" else "fade",
+                    "duration": 0.0 if transition_name == "cut" else 0.25,
                 },
                 "caption": str(raw_scene.get("caption", f"镜头 {index}")).strip() or f"镜头 {index}",
                 "notes": str(raw_scene.get("notes", "")).strip(),
             }
         )
     if not scenes:
-        for raw_scene in fallback_scenes(request, manifest):
-            plan["scenes"] = [raw_scene]
-        return build_timeline(plan, request, manifest)
+        plan["scenes"] = fallback_scenes(request, manifest, analysis)
+        if plan["scenes"]:
+            return build_timeline(plan, request, manifest, analysis)
+        raise AgentError("时间线为空，无法渲染。")
 
     return {
-        "version": 1,
+        "version": 2,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "brief": request.style.strip(),
         "agent_plan": plan,
@@ -464,6 +558,7 @@ def build_script_markdown(
     timeline: dict[str, Any],
     request: EditRequest,
     manifest: dict[str, Any],
+    analysis: dict[str, Any] | None,
 ) -> str:
     lines = [
         f"# {plan.get('title', request.output_name or 'AI 自动剪辑')}",
@@ -475,14 +570,26 @@ def build_script_markdown(
         f"- 重点剪辑补充：{request.focus_notes}",
         f"- 目标时长：{request.target_duration} 秒",
         f"- 画幅：{request.aspect_ratio}",
+        f"- 算法优化：{'开启' if request.enable_algorithm else '关闭'}",
         "",
         "## 剪辑思路",
         "",
-        str(plan.get("summary", "根据素材自动组织镜头。")),
-        "",
-        "## 镜头脚本",
+        str(plan.get("summary", "根据素材和算法评分自动组织镜头。")),
         "",
     ]
+    if analysis:
+        summary = analysis.get("summary", {})
+        lines.extend(
+            [
+                "## 算法分析摘要",
+                "",
+                f"- 候选片段数：{summary.get('segment_count', 0)}",
+                f"- 最高高光分：{summary.get('best_score', 0)}",
+                "- 算法指标：清晰度、运动量、音频能量、亮度、对比度",
+                "",
+            ]
+        )
+    lines.extend(["## 镜头脚本", ""])
     cursor = 0.0
     for scene in timeline["scenes"]:
         end = cursor + float(scene["duration"])
@@ -491,8 +598,10 @@ def build_script_markdown(
                 f"### {scene['id']}  {cursor:.2f}s - {end:.2f}s",
                 "",
                 f"- 素材：{scene['asset']}",
+                f"- 素材起点：{float(scene.get('start', 0)):.2f}s",
                 f"- 字幕：{scene['caption']}",
                 f"- 剪辑说明：{scene.get('notes', '')}",
+                f"- 算法分：{scene.get('algorithm_score', '')}",
                 "",
             ]
         )
@@ -981,7 +1090,15 @@ def find_ffprobe() -> str | None:
     local_ffprobe = ROOT / "tools" / "ffmpeg" / "bin" / "ffprobe.exe"
     if local_ffprobe.exists():
         return str(local_ffprobe)
-    return shutil.which("ffprobe")
+    path_ffprobe = shutil.which("ffprobe")
+    if path_ffprobe:
+        return path_ffprobe
+    ffmpeg = find_ffmpeg()
+    if ffmpeg:
+        sibling = Path(ffmpeg).with_name("ffprobe.exe")
+        if sibling.exists():
+            return str(sibling)
+    return None
 
 
 def run_command(cmd: list[str], log_path: Path) -> None:

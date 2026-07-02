@@ -2,58 +2,63 @@
 
 Version: **1.0.0**
 
-AI Video Agent 是一个 Windows 本地 AI 视频剪辑工具。用户填写自己的 OpenAI-compatible API Key，选择本地素材文件夹，输入想要的视频风格、关键帧偏好和重点内容，应用会自动生成剪辑脚本、时间线、字幕，并优先调用 DaVinci Resolve 导出成片；如果 DaVinci Resolve 不可用，则自动回退到 FFmpeg。
+AI Video Agent 是一个 Windows 本地创作 Agent，包含两个核心模式：
 
-## 功能
+1. **视频剪辑**：用户选择素材文件夹、BGM 文件夹和输出文件夹，填写想要的成片风格、关键帧要求和重点内容要求。Agent 会先做轻量视频分析，再调用用户自己的 OpenAI-compatible 文本大模型生成剪辑方案，最后优先调用 DaVinci Resolve，失败时自动回退到 FFmpeg。
+2. **图片生成**：使用本地 SDXL + IP-Adapter + ControlNet 工作流，支持文生图、参考图风格迁移、保留内容改风格。DashScope/Qwen 可选用于风格参考图分析和提示词改写。
 
-- Windows 本地窗口界面
-- 兼容 OpenAI 格式接口：DeepSeek、OpenAI、OpenRouter、硅基流动等
-- 支持选择任意素材文件夹、BGM 文件夹和输出文件夹
-- 自动生成剪辑脚本、`timeline.json`、SRT 字幕和运行报告
-- DaVinci Resolve 优先：自动创建工程/时间线并导出 MP4
-- FFmpeg 后备渲染：没有 DaVinci 时也能输出粗剪 MP4
-- 默认中文界面和中文剪辑指令
+仓库只保留应用代码、安装配置和说明文档；本地素材、输出结果、模型权重、缓存、字幕和时间线会被 `.gitignore` 忽略。
+
+## 功能概览
+
+- Windows 桌面窗口界面，默认中文。
+- 视频剪辑支持 DeepSeek、OpenAI、OpenRouter、硅基流动等 OpenAI-compatible Chat API。
+- 支持选择任意素材文件夹、BGM 文件夹和输出文件夹。
+- 视频剪辑会输出成片、剪辑脚本、字幕、timeline、运行报告和算法分析报告。
+- 轻量算法优化：候选片段切分、清晰度评分、运动量评分、音频能量评分、高光片段排序、时间线修正。
+- 图片生成使用本地模型：
+  - SDXL 文生图。
+  - IP-Adapter 注入风格参考图。
+  - ControlNet Canny 保持内容图结构。
+  - DashScope/Qwen 可选做风格图分析和 prompt 改写。
 
 ## 环境要求
 
 - Windows 10/11
-- Python 3.10+
+- Python 3.10+，推荐 3.10、3.11 或 3.12
 - pip
-- FFmpeg，可加入系统 PATH，或自行创建 `tools/ffmpeg/bin/` 并放入 `ffmpeg.exe`
-- 可选：DaVinci Resolve Studio，并启用本地脚本接口
-
-Python 自带 `tkinter`，本项目 1.0.0 默认不依赖大型 GUI 框架。
+- NVIDIA 显卡推荐 8GB 显存以上；低显存可运行但会更慢
+- FFmpeg：用于视频分析和 FFmpeg 后备渲染
+- 可选：DaVinci Resolve，并开启本地脚本接口
 
 ## 安装
-
-克隆仓库：
 
 ```powershell
 git clone https://github.com/dongdoublez66-create/AI-Video-Agent.git
 cd AI-Video-Agent
-```
-
-创建虚拟环境：
-
-```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 ```
 
-升级 pip 并安装项目：
+如果需要 GPU 加速，先安装与你显卡驱动匹配的 PyTorch CUDA 版。下面是 CUDA 12.1 示例：
 
 ```powershell
-python -m pip install --upgrade pip
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+再安装项目依赖：
+
+```powershell
+python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-如果你的电脑没有 FFmpeg，可以自行创建目录并把 `ffmpeg.exe` 放到：
+如果 Hugging Face 模型下载慢，可以在启动前设置镜像：
 
-```text
-tools/ffmpeg/bin/ffmpeg.exe
+```powershell
+$env:HF_ENDPOINT="https://hf-mirror.com"
 ```
-
-或者安装到系统 PATH。
 
 ## 启动
 
@@ -63,88 +68,136 @@ tools/ffmpeg/bin/ffmpeg.exe
 python -m ai_video_agent gui
 ```
 
-安装后也可以运行：
+安装后也可以使用命令：
 
 ```powershell
 ai-video-agent-gui
 ```
 
-## 使用方式
+检查本地依赖：
 
-1. 打开应用。
-2. 在“模型连接”里填写：
-   - Base URL
-   - API Key
-   - 模型名称
-3. 点击“验证 API”。
-4. 选择素材文件夹。
-5. 可选：选择 BGM 文件夹。
-6. 选择输出文件夹。
-7. 输入视频风格、关键帧补充、重点剪辑补充。
-8. 点击底部“开始自动剪辑”。
+```powershell
+python -m ai_video_agent doctor
+```
 
-DeepSeek 示例：
+初始化本地工作目录：
+
+```powershell
+python -m ai_video_agent init
+```
+
+## API 配置
+
+### 视频剪辑 API
+
+视频剪辑需要文本大模型 API。DeepSeek 示例：
 
 ```text
 Base URL: https://api.deepseek.com/v1
 Model: deepseek-chat
 ```
 
-## 输出内容
+也可以使用其他 OpenAI-compatible Chat API，只要支持 `/chat/completions`。
 
-成片会保存到你在窗口中选择的输出文件夹。
+### 图片生成 API
 
-项目内会保留过程产物：
+图片主体生成在本地完成，不再需要 OpenAI、MiniMax、ComfyUI 或 ChordEdit 图片后端。
 
-```text
-outputs/logs/       # 剪辑脚本和渲染日志
-timelines/          # timeline.json
-subtitles/          # SRT 字幕
-workspace/runs/     # 每次运行的素材扫描、关键帧、报告
-```
+DashScope API Key 是可选项，只用于：
 
-这些目录是运行时自动生成的本地数据，不作为 GitHub 仓库内容提交。
+- 分析风格参考图。
+- 将中文需求改写为更适合 SDXL 的英文 positive/negative prompt。
 
-## DaVinci Resolve
-
-如果 DaVinci Resolve 可用，Agent 会优先：
-
-1. 连接 DaVinci Resolve 脚本接口
-2. 创建或打开 `AI_Video_Agent` 工程
-3. 创建新时间线
-4. 导入素材和 BGM
-5. 写入剪辑片段和 marker
-6. 导出 MP4
-
-如果连接失败，会自动使用 FFmpeg 渲染，不会中断整个剪辑流程。
-
-## 命令行工具
-
-检查环境：
+可以在图片生成页直接填写，也可以使用环境变量：
 
 ```powershell
-python -m ai_video_agent doctor
+setx DASHSCOPE_API_KEY YOUR_DASHSCOPE_KEY
 ```
 
-初始化目录：
+## 使用方式
+
+### 视频剪辑
+
+1. 打开应用，进入“视频剪辑”。
+2. 填写 Base URL、API Key 和模型名。
+3. 点击“验证剪辑 API”。
+4. 选择素材文件夹、BGM 文件夹和输出文件夹。
+5. 填写视频风格、关键帧补充、重点内容剪辑方式。
+6. 建议保持“启用算法优化”开启。
+7. 点击“剪辑视频”。
+
+### 图片生成
+
+1. 打开应用，进入“图片生成”。
+2. 选择生成方式：
+   - **文生图**：只根据文字生成图片，也可以额外提供风格参考图。
+   - **参考图风格迁移**：选择一张内容图片和一张风格参考图，尽量保留内容结构并迁移画风。
+   - **保留内容改风格**：选择内容图片，用文字描述要改成的风格。
+3. 可选填写 DashScope Key，开启智能风格分析和提示词改写。
+4. 设置输出文件夹、尺寸、数量、采样步数、seed、重绘强度、风格注入强度。
+5. 点击“生成图片”。
+
+第一次运行图片生成时会下载 SDXL、ControlNet 和 IP-Adapter 模型，耗时较长。后续会复用本地缓存。
+
+## 命令行图片生成示例
+
+文生图：
 
 ```powershell
-python -m ai_video_agent init
+python -m ai_video_agent image `
+  --mode text_to_image `
+  --prompt "一幅未来城市夜景，电影感，高细节" `
+  --out-dir outputs/images
 ```
 
-## 目录结构
+参考图风格迁移：
+
+```powershell
+python -m ai_video_agent image `
+  --mode style_reference `
+  --prompt "保留内容图主体和构图，改成参考图的画作风格" `
+  --content-image inputs/images/content.png `
+  --style-reference-image inputs/images/style.png `
+  --dashscope-api-key $env:DASHSCOPE_API_KEY
+```
+
+## 项目结构
 
 ```text
-ai_video_agent/     # Agent 应用代码
-README.md           # 使用说明
-pyproject.toml      # pip 安装配置
-.gitignore          # 忽略本地素材、输出、缓存和密钥
+ai_video_agent/
+  __main__.py              # python -m ai_video_agent 入口
+  cli.py                   # 命令行入口
+  gui.py                   # Windows 桌面界面
+  agent.py                 # 视频剪辑主流程
+  llm.py                   # OpenAI-compatible Chat API 客户端
+  video_analysis.py        # 轻量视频分析
+  timeline_optimizer.py    # 时间线算法优化
+  image_agent.py           # 本地 SDXL 图片生成流程
+  image_llm.py             # DashScope/Qwen 风格分析和 prompt 改写
+requirements.txt           # pip 依赖
+pyproject.toml             # 本地安装配置
+README.md                  # 使用说明
+.gitignore                 # 忽略本地素材、输出、模型、缓存和密钥
 ```
 
-素材、BGM、输出视频、字幕、时间线、缓存等都由用户在应用里选择或由程序运行时生成，不需要放进仓库。
+## 本地文件说明
 
-## 注意
+以下目录由程序运行时创建或由用户自己放入文件，不提交到 GitHub：
 
-- 不要把自己的 API Key 写进仓库。
-- 原始素材只读，Agent 会把结果写到输出文件夹和 `workspace/`。
-- 第一版主要面向自动粗剪，复杂转场、字幕样式、调色和音频混音可以在 DaVinci 里继续精修。
+```text
+assets/
+inputs/
+outputs/
+models/
+subtitles/
+timelines/
+workspace/
+tools/ffmpeg/bin/
+```
+
+## 注意事项
+
+- 不要把 API Key 写进代码或提交到仓库。
+- 图片生成默认使用本地模型；显存不足时可以降低尺寸、采样步数和生成数量。
+- DaVinci Resolve 不可用时，视频剪辑会尝试自动回退到 FFmpeg。
+- FFmpeg 可以安装到系统 PATH，也可以放到 `tools/ffmpeg/bin/ffmpeg.exe`。
