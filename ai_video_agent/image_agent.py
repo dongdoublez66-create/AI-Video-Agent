@@ -22,7 +22,7 @@ from .config import (
     IP_ADAPTER_WEIGHT_NAME,
     ROOT,
 )
-from .image_llm import LLMService
+from .image_llm import LLMService, STYLE_PRIORITY_PROMPT_EN, STYLE_PRIORITY_TERMS_CN
 
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -149,6 +149,7 @@ def run_image_generation(request: ImageRequest, log: LogFn = print) -> ImageResu
         "style_strength": request.style_strength,
         "canny_low": request.canny_low,
         "canny_high": request.canny_high,
+        "style_priority_terms": list(STYLE_PRIORITY_TERMS_CN),
         "images": [str(path) for path in saved],
         "prompt_plan": str(prompt_path),
     }
@@ -182,16 +183,25 @@ def build_prompt_plan(
             positive, negative = llm.text2prompt(request.prompt.strip(), style_description)
             if positive.strip():
                 return {
-                    "positive_prompt": positive.strip(),
-                    "negative_prompt": negative.strip() or request.negative_prompt,
+                    "positive_prompt": apply_style_priority_constraints(positive.strip(), request.mode),
+                    "negative_prompt": apply_negative_priority_constraints(
+                        negative.strip() or request.negative_prompt,
+                        request.mode,
+                    ),
                     "style_description": style_description,
                 }
         except Exception as exc:  # noqa: BLE001 - fall back to deterministic prompt builder.
             log(f"智能提示词生成失败，将使用内置提示词模板：{exc}")
 
     return {
-        "positive_prompt": build_fallback_positive_prompt(request, style_description),
-        "negative_prompt": request.negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT,
+        "positive_prompt": apply_style_priority_constraints(
+            build_fallback_positive_prompt(request, style_description),
+            request.mode,
+        ),
+        "negative_prompt": apply_negative_priority_constraints(
+            request.negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT,
+            request.mode,
+        ),
         "style_description": style_description,
     }
 
@@ -203,16 +213,54 @@ def build_fallback_positive_prompt(request: ImageRequest, style_description: str
         parts.append("high quality SDXL image, coherent composition, rich details")
     elif request.mode == "style_reference":
         parts.append(
-            "preserve the content image composition, silhouettes, subject placement and spatial relationships"
+            "preserve the content image composition, silhouettes, subject placement and spatial relationships; "
+            "transfer the reference style mainly through composition, segmentation, texture, tone, value structure, "
+            "point-line-plane design, block-plane relationships and color relationships"
         )
     elif request.mode == "edit_style":
-        parts.append("preserve the source image structure and edges, change only the visual style")
+        parts.append(
+            "preserve the source image structure and edges, change only the visual style through composition, "
+            "segmentation, texture, tone, black-white-gray value structure, expressive or abstract painting method, "
+            "point-line-plane design, block-plane relationships and color relationships"
+        )
     if style_description:
         parts.append(f"style reference analysis: {style_description}")
     parts.append(
         "artwork style, painterly rendering, visible brushwork or print texture, refined color palette, no text watermark"
     )
     return ", ".join(part for part in parts if part)
+
+
+def apply_style_priority_constraints(prompt: str, mode: str) -> str:
+    """Put the user's preferred art-analysis vocabulary at the front of the SDXL prompt.
+
+    Diffusers does not parse A1111-style numeric weights by default, so we increase
+    influence by placing these constraints early, spelling them out, and repeating
+    them in the restyle-specific instruction.
+    """
+    cleaned = prompt.strip()
+    mode_instruction = ""
+    if mode in {"style_reference", "edit_style"}:
+        mode_instruction = (
+            ", preserve original content and structure; change the image primarily through these style dimensions"
+        )
+    priority = f"{STYLE_PRIORITY_PROMPT_EN}{mode_instruction}"
+    if priority.lower() in cleaned.lower():
+        return cleaned
+    return f"{priority}, {cleaned}"
+
+
+def apply_negative_priority_constraints(negative_prompt: str, mode: str) -> str:
+    cleaned = negative_prompt.strip() or DEFAULT_NEGATIVE_PROMPT
+    if mode not in {"style_reference", "edit_style"}:
+        return cleaned
+    extra = (
+        "changed subject, replaced content, lost original composition, destroyed silhouettes, "
+        "unrelated texture, unrelated tonal palette, inconsistent value structure, random color relationships"
+    )
+    if extra.lower() in cleaned.lower():
+        return cleaned
+    return f"{cleaned}, {extra}"
 
 
 class ImageGenerator:

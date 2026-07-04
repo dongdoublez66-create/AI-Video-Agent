@@ -8,9 +8,48 @@ from pathlib import Path
 from typing import Any
 
 
+STYLE_PRIORITY_TERMS_CN = (
+    "画面构成",
+    "分割",
+    "肌理",
+    "色调",
+    "黑白灰关系",
+    "表现画法",
+    "抽象画法",
+    "点线面构成",
+    "块面关系",
+    "色彩关系",
+    "统一色调",
+    "同类色对比",
+    "类似色对比",
+    "互补色对比",
+)
+
+STYLE_PRIORITY_GUIDE_CN = (
+    "以下是最高优先级的风格分析维度，请把它们放在媒介、题材和故事描述之前："
+    "画面构成、分割、肌理、色调、黑白灰关系、表现画法、抽象画法、点线面构成、"
+    "块面关系、色彩关系、统一色调、同类色对比、类似色对比、互补色对比。"
+)
+
+STYLE_PRIORITY_PROMPT_EN = (
+    "high-priority art-direction constraints: image composition, visual segmentation, "
+    "surface texture and material grain, tonal palette, black-white-gray value structure, "
+    "expressive painting method, abstract painting treatment, point-line-plane composition, "
+    "block and plane relationships, color relationships, unified tonal harmony, "
+    "same-hue contrast, analogous color contrast, complementary color contrast"
+)
+
+
 STYLE_ANALYSIS_PROMPT = (
     "请详细描述这幅画的视觉风格，用于 Stable Diffusion / SDXL 提示词生成。"
-    "重点分析媒介类型、流派、笔触、线条、色彩、明暗、构图、人物造型、空间关系、纹理、纸张或印刷质感。"
+    f"{STYLE_PRIORITY_GUIDE_CN}"
+    "请按这些维度优先分析："
+    "1）画面构成与分割：主体位置、空间切分、视线流动、留白、疏密节奏；"
+    "2）肌理与画法：笔触、印刷感、纸张感、颗粒、刮擦、表现画法或抽象画法；"
+    "3）黑白灰关系：明度层级、暗部/中间调/亮部比例、整体压暗或提亮方式；"
+    "4）点线面构成与块面关系：线条方向、几何块面、形体概括、平面化程度；"
+    "5）色彩关系：统一色调、同类色对比、类似色对比、互补色对比、饱和度和冷暖关系。"
+    "再补充媒介类型、流派、人物造型、空间关系、纹理、纸张或印刷质感。"
     "不要复述画面故事，也不要生成新内容。最后给出一段可直接用于图像生成的中文风格提示词。"
 )
 
@@ -18,6 +57,8 @@ STYLE_ANALYSIS_PROMPT = (
 PROMPT_REWRITE_SYSTEM = (
     "你是图像生成提示词工程师。请把用户的中文需求改写为适合 SDXL 的英文 positive prompt 和 negative prompt。"
     "如果给了风格分析，要把风格转成清晰的视觉约束，但不要改变用户要求的主体内容。"
+    f"必须把这些维度作为最高权重写入 positive prompt 的前半部分：{STYLE_PRIORITY_PROMPT_EN}。"
+    "当任务是参考图风格迁移或保留内容改风格时，优先迁移这些风格维度，而不是替换原图主体。"
     "只返回 JSON，格式为 {\"pos\": \"...\", \"neg\": \"...\"}。"
 )
 
@@ -63,7 +104,9 @@ class LLMService:
             f"{PROMPT_REWRITE_SYSTEM}\n\n"
             f"用户需求：{user_text.strip()}\n\n"
             f"风格分析：{style_description.strip() or '无'}\n"
-            "要求：positive prompt 必须是英文，强调主体、构图、材质、风格、光线和质量；"
+            "要求：positive prompt 必须是英文，并且先写高权重美术风格约束，再写主体内容。"
+            "请重点保留/迁移画面构成、分割、肌理、色调、黑白灰关系、表现画法、抽象画法、"
+            "点线面构成、块面关系、色彩关系、统一色调、同类色对比、类似色对比、互补色对比；"
             "negative prompt 用英文列出低质量、变形、多余文字、水印、主体错乱等问题。"
         )
         last_error: Exception | None = None
