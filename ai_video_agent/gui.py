@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .agent import EditRequest, run_edit
-from .image_agent import ImageRequest, run_image_generation
+from .image_agent import ImageRequest, read_image_dimensions, run_image_generation, safe_generation_size
 from .llm import LLMConfig, OpenAICompatibleClient
 
 
@@ -821,11 +821,10 @@ class VideoAgentApp(tk.Tk):
     def _build_video_prompt_card(self, parent: ttk.Frame) -> None:
         surface = RoundedPanel(parent, fill=PANEL, radius=28, padding=22, auto_height=False)
         surface.grid(row=0, column=0, sticky="nsew")
-        card = surface.body
+        surface.body.columnconfigure(0, weight=1)
+        surface.body.rowconfigure(0, weight=1)
+        card = self._scrollable_content(surface.body)
         card.columnconfigure(0, weight=1)
-        card.rowconfigure(2, weight=1)
-        card.rowconfigure(4, weight=1)
-        card.rowconfigure(6, weight=1)
         ttk.Label(card, text="剪辑指令", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(
             card,
@@ -878,7 +877,7 @@ class VideoAgentApp(tk.Tk):
         self._field(card, "输出名称", self.image_output_name, 23)
 
         self._section_label(card, "生成参数", 25)
-        self._choice_field(card, "尺寸", self.image_size, ("1024x1024", "1024x1536", "1536x1024"), 26)
+        self._choice_field(card, "尺寸", self.image_size, ("1024x1024", "1024x1536", "1536x1024", "跟随内容图"), 26)
         ttk.Label(card, text="数量", style="PanelMuted.TLabel").grid(row=28, column=0, sticky="w", pady=(10, 4))
         RoundedSpinbox(card, from_=1, to=4, textvariable=self.image_count).grid(row=29, column=0, sticky="ew")
         ttk.Label(card, text="采样步数", style="PanelMuted.TLabel").grid(row=30, column=0, sticky="w", pady=(10, 4))
@@ -960,13 +959,15 @@ class VideoAgentApp(tk.Tk):
         scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         canvas.configure(yscrollcommand=scrollbar.set)
-        inner = ttk.Frame(canvas, style="Panel.TFrame", padding=22)
+        # Leave a slightly larger right gutter so rounded inputs never sit
+        # underneath the scrollbar on narrower Windows display scales.
+        inner = ttk.Frame(canvas, style="Panel.TFrame", padding=(22, 22, 34, 22))
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.columnconfigure(0, weight=1)
 
         def update_scroll_region(_event=None) -> None:
             canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfigure(window, width=canvas.winfo_width())
+            canvas.itemconfigure(window, width=max(1, canvas.winfo_width()))
 
         inner.bind("<Configure>", update_scroll_region)
         canvas.bind("<Configure>", update_scroll_region)
@@ -1000,6 +1001,44 @@ class VideoAgentApp(tk.Tk):
         inner.bind("<Enter>", bind_wheel)
         inner.bind("<Leave>", unbind_wheel)
         return shell, inner
+
+    def _scrollable_content(self, parent: tk.Widget) -> ttk.Frame:
+        shell = ttk.Frame(parent, style="Panel.TFrame")
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(shell, bg=PANEL, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        inner = ttk.Frame(canvas, style="Panel.TFrame", padding=(0, 0, 10, 0))
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.columnconfigure(0, weight=1)
+
+        def update_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(window, width=max(1, canvas.winfo_width() - 18))
+
+        inner.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", update_scroll_region)
+
+        def on_mousewheel(event) -> str:
+            delta = -1 * int(event.delta / 120) if event.delta else 0
+            if delta:
+                canvas.yview_scroll(delta, "units")
+            return "break"
+
+        def bind_wheel(_event) -> None:
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        def unbind_wheel(_event) -> None:
+            canvas.unbind_all("<MouseWheel>")
+
+        for widget in (canvas, inner):
+            widget.bind("<Enter>", bind_wheel)
+            widget.bind("<Leave>", unbind_wheel)
+        return inner
 
     def _card(self, parent: ttk.Frame, title: str) -> ttk.Frame:
         rows = [int(child.grid_info().get("row", 0)) for child in parent.grid_slaves()]
@@ -1061,9 +1100,9 @@ class VideoAgentApp(tk.Tk):
         self._path_field(parent, label, variable, row, command)
 
     def _text_area(self, parent: ttk.Frame, row: int, label: str) -> tk.Text:
-        ttk.Label(parent, text=label, style="PanelMuted.TLabel").grid(row=row, column=0, sticky="w", pady=(8, 4))
+        ttk.Label(parent, text=label, style="PanelMuted.TLabel").grid(row=row, column=0, sticky="w", pady=(12, 6))
         text_box = RoundedTextBox(parent, height=110, font=("Microsoft YaHei UI", 10))
-        text_box.grid(row=row + 1, column=0, sticky="nsew")
+        text_box.grid(row=row + 1, column=0, sticky="ew", pady=(0, 10))
         return text_box.text
 
     def choose_media_dir(self) -> None:
@@ -1110,6 +1149,22 @@ class VideoAgentApp(tk.Tk):
         )
         if path:
             self.content_image.set(path)
+            self._sync_image_size_to_content(path)
+
+    def _sync_image_size_to_content(self, path: str) -> None:
+        try:
+            original_width, original_height = read_image_dimensions(Path(path))
+            width, height = safe_generation_size(original_width, original_height)
+            self.image_size.set(f"{width}x{height}")
+            if (width, height) == (original_width, original_height):
+                self._log(f"已按内容图片尺寸设置生成尺寸：{width}x{height}")
+            else:
+                self._log(
+                    "内容图片尺寸较大，已按比例设置为安全生成尺寸："
+                    f"{width}x{height}（原图 {original_width}x{original_height}）"
+                )
+        except Exception as exc:  # noqa: BLE001 - keep file selection usable.
+            self._log(f"读取内容图片尺寸失败，继续使用当前尺寸设置：{exc}")
 
     def validate_api(self) -> None:
         self.validate_button.configure(state="disabled")

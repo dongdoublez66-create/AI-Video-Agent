@@ -28,6 +28,8 @@ from .image_llm import LLMService, STYLE_PRIORITY_PROMPT_EN, STYLE_PRIORITY_TERM
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 LogFn = Callable[[str], None]
+MAX_AUTO_IMAGE_LONG_EDGE = 2048
+MAX_AUTO_IMAGE_PIXELS = 1536 * 1536
 
 
 @dataclass(frozen=True)
@@ -281,7 +283,7 @@ class ImageGenerator:
         request: ImageRequest,
     ) -> list[Any]:
         pipe = self._load_base_pipe()
-        width, height = parse_image_size(request.size)
+        width, height = resolve_request_size(request)
         kwargs = self._common_kwargs(prompt, negative_prompt, request)
         kwargs.update({"width": width, "height": height})
         if style_reference_image and style_reference_image.exists():
@@ -300,7 +302,7 @@ class ImageGenerator:
         if not content_image:
             raise ImageGenerationError("缺少内容图片。")
         pipe = self._load_control_pipe(load_ip_adapter=False)
-        width, height = parse_image_size(request.size)
+        width, height = resolve_request_size(request)
         source = self._open_image(content_image, width, height)
         canny = self._build_canny_image(source, request.canny_low, request.canny_high)
         kwargs = self._common_kwargs(prompt, negative_prompt, request)
@@ -327,7 +329,7 @@ class ImageGenerator:
         if not style_reference_image:
             raise ImageGenerationError("缺少风格参考图。")
         pipe = self._load_control_pipe(load_ip_adapter=True)
-        width, height = parse_image_size(request.size)
+        width, height = resolve_request_size(request)
         source = self._open_image(content_image, width, height)
         style = self._open_image(style_reference_image, width, height)
         canny = self._build_canny_image(source, request.canny_low, request.canny_high)
@@ -477,10 +479,16 @@ class ImageGenerator:
 
     def _open_image(self, path: Path, width: int, height: int) -> Any:
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
         except ImportError as exc:
             raise missing_dependency_error("Pillow") from exc
-        image = Image.open(path).convert("RGB")
+        # Very large local reference/content images are allowed, but they are
+        # immediately downsampled to the requested generation size before being
+        # passed to SDXL/IP-Adapter/ControlNet.
+        Image.MAX_IMAGE_PIXELS = None
+        with Image.open(path) as raw:
+            raw.draft("RGB", (width, height))
+            image = ImageOps.exif_transpose(raw).convert("RGB")
         return fit_image(image, width, height)
 
     def _import_torch(self) -> Any:
@@ -529,6 +537,49 @@ def parse_image_size(size: str) -> tuple[int, int]:
         except ValueError:
             pass
     return 1024, 1024
+
+
+def resolve_request_size(request: ImageRequest) -> tuple[int, int]:
+    size = (request.size or "").strip()
+    if size.lower() in {"auto", "content", "source", "跟随内容图", "内容图尺寸", "原图尺寸"}:
+        if request.content_image:
+            return safe_generation_size(*read_image_dimensions(request.content_image))
+        return 1024, 1024
+    return parse_image_size(size)
+
+
+def read_image_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise missing_dependency_error("Pillow") from exc
+    Image.MAX_IMAGE_PIXELS = None
+    with Image.open(path) as image:
+        return int(image.width), int(image.height)
+
+
+def safe_generation_size(
+    width: int,
+    height: int,
+    max_long_edge: int = MAX_AUTO_IMAGE_LONG_EDGE,
+    max_pixels: int = MAX_AUTO_IMAGE_PIXELS,
+) -> tuple[int, int]:
+    width = max(1, int(width))
+    height = max(1, int(height))
+    longest = max(width, height)
+    pixels = width * height
+    scale = 1.0
+    if longest > max_long_edge:
+        scale = min(scale, max_long_edge / longest)
+    if pixels > max_pixels:
+        scale = min(scale, (max_pixels / pixels) ** 0.5)
+    if scale < 1.0:
+        width = max(256, round(width * scale))
+        height = max(256, round(height * scale))
+    else:
+        width = max(256, width)
+        height = max(256, height)
+    return round_to_multiple(width, 8), round_to_multiple(height, 8)
 
 
 def round_to_multiple(value: int, factor: int) -> int:
