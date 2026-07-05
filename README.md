@@ -189,24 +189,8 @@ README.md                  # 使用说明
 .gitignore                 # 忽略本地素材、输出、模型、缓存和密钥
 ```
 
-## 本地文件说明
-
-以下目录由程序运行时创建或由用户自己放入文件，不提交到 GitHub：
-
-```text
-assets/
-inputs/
-outputs/
-models/
-subtitles/
-timelines/
-workspace/
-tools/ffmpeg/bin/
-```
-
 ## 注意事项
 
 - 不要把 API Key 写进代码或提交到仓库。
 - 图片生成默认使用本地模型；显存不足时可以降低尺寸、采样步数和生成数量。
 - DaVinci Resolve 不可用时，视频剪辑会尝试自动回退到 FFmpeg。
-- FFmpeg 可以安装到系统 PATH，也可以放到 `tools/ffmpeg/bin/ffmpeg.exe`。
